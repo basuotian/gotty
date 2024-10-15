@@ -60,3 +60,11 @@ func WithMasterPreferences(preferences interface{}) Option {
 		return nil
 	}
 }
+
+// WithAuditUser sets an auditUser pass by athena
+func WithAuditUser(auditUser string) Option {
+	return func(wt *WebTTY) error {
+		wt.auditUser = auditUser
+		return nil
+	}
+}

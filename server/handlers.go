@@ -115,6 +115,14 @@ func (server *Server) processWSConn(ctx context.Context, conn *websocket.Conn) e
 		return errors.Wrapf(err, "failed to parse arguments")
 	}
 	params := query.Query()
+	// 提取user作为审计参数
+	auditUser := params.Get("auditUser")
+	if auditUser == "" {
+		return errors.New("auditUser is required")
+	} else {
+		params.Del("auditUser")
+	}
+
 	var slave Slave
 	slave, err = server.factory.New(params)
 	if err != nil {
@@ -157,6 +165,8 @@ func (server *Server) processWSConn(ctx context.Context, conn *websocket.Conn) e
 	if server.options.Preferences != nil {
 		opts = append(opts, webtty.WithMasterPreferences(server.options.Preferences))
 	}
+
+	opts = append(opts, webtty.WithAuditUser(auditUser))
 
 	tty, err := webtty.New(&wsWrapper{conn}, slave, opts...)
 	if err != nil {

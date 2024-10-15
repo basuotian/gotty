@@ -4,10 +4,28 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"os"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/pkg/errors"
+	log "github.com/sirupsen/logrus"
 )
+
+func init() {
+	loglevel := os.Getenv("GOTTY_LOG_LEVEL")
+	if loglevel == "" {
+		loglevel = "info"
+	}
+	level, err := log.ParseLevel(loglevel)
+	if err != nil {
+		level = log.InfoLevel
+	}
+	log.SetFormatter(&log.TextFormatter{})
+	log.SetLevel(log.Level(level))
+	log.SetReportCaller(true)
+}
 
 // WebTTY bridges a PTY slave and its PTY master.
 // To support text-based streams and side channel commands such as
@@ -27,6 +45,9 @@ type WebTTY struct {
 
 	bufferSize int
 	writeMutex sync.Mutex
+
+	auditBuffer []byte
+	auditUser   string
 }
 
 // New creates a new instance of WebTTY.
@@ -134,6 +155,7 @@ func (wt *WebTTY) sendInitializeMessage() error {
 }
 
 func (wt *WebTTY) handleSlaveReadEvent(data []byte) error {
+	wt.audit("send", data)
 	safeMessage := base64.StdEncoding.EncodeToString(data)
 	err := wt.masterWrite(append([]byte{Output}, []byte(safeMessage)...))
 	if err != nil {
@@ -159,7 +181,7 @@ func (wt *WebTTY) handleMasterReadEvent(data []byte) error {
 	if len(data) == 0 {
 		return errors.New("unexpected zero length read from master")
 	}
-
+	wt.audit("recive", data[1:])
 	switch data[0] {
 	case Input:
 		if !wt.permitWrite {
@@ -213,7 +235,77 @@ func (wt *WebTTY) handleMasterReadEvent(data []byte) error {
 	return nil
 }
 
+func (wt *WebTTY) audit(action string, msg []byte) {
+	if !filterASCII(action, msg) {
+		return
+	}
+	if action == "send" {
+		if len(msg) > 1 && msg[:len(msg)][0] != 35 {
+			log.WithFields(log.Fields{
+				"time": time.Now(),
+				"user": wt.auditUser,
+			}).Debug("ASCII返回:", msg)
+
+			output := strings.Replace(string(msg), "sh-4.3#", "", -1)
+			log.WithFields(log.Fields{
+				"time": time.Now(),
+				"user": wt.auditUser,
+			}).Info("msg=", output)
+		}
+	} else if action == "recive" {
+		if len(msg) > 0 {
+			log.Debug(time.Now(), wt.auditUser, "--- ASCII返回:", msg)
+			for i, s := range msg {
+				if s == 8 {
+					wt.auditBuffer = wt.auditBuffer[:len(wt.auditBuffer)]
+					continue
+				}
+				if s == 13 {
+					if len(wt.auditBuffer) > 0 && i == len(msg)-1 {
+						output := strings.Replace(string(wt.auditBuffer), "sh-4.3#", "", -1)
+						log.WithFields(log.Fields{
+							"time": time.Now(),
+							"user": wt.auditUser,
+						}).Info("msg=", output)
+						wt.auditBuffer = []byte{}
+						continue
+					}
+					if i == 0 {
+						log.Debug("---- 开头返回换行，跳过")
+						return
+					}
+
+				} else {
+					log.Debug("---- 单个ASCII返回: ", string(s))
+					wt.auditBuffer = append(wt.auditBuffer, s)
+				}
+			}
+		}
+	}
+}
+
 type argResizeTerminal struct {
 	Columns float64
 	Rows    float64
+}
+
+func filterASCII(action string, msg []byte) bool {
+	if len(msg) > 1 && msg[0] == 13 && msg[1] == 10 && msg[len(msg)-1] == 32 && msg[len(msg)-2] == 35 {
+		log.Debug("---CR LF sh-4.3#---，不审计")
+		return false
+	}
+	if len(msg) > 1 && msg[0] == 115 && msg[1] == 104 && msg[len(msg)-1] == 32 && msg[len(msg)-2] == 35 {
+		log.Debug("---sh-4.3#---，不审计")
+		return false
+	}
+	if len(msg) == 2 && msg[0] == 13 && msg[1] == 10 {
+		log.Debug("---CR LF---，不审计")
+		return false
+	}
+	if action == "send" && len(msg) == 1 && msg[0] == 13 {
+		log.Debug("---CR---，不审计")
+		return false
+	}
+
+	return true
 }

@@ -46,8 +46,9 @@ type WebTTY struct {
 	bufferSize int
 	writeMutex sync.Mutex
 
-	auditBuffer []byte
-	auditUser   string
+	auditBuffer         []byte
+	auditUser           string
+	waitForAutocomplete bool
 }
 
 // New creates a new instance of WebTTY.
@@ -240,22 +241,31 @@ func (wt *WebTTY) audit(action string, msg []byte) {
 		return
 	}
 	if action == "send" {
+		if wt.waitForAutocomplete {
+			wt.waitForAutocomplete = false
+			wt.auditBuffer = append(wt.auditBuffer, msg...)
+		}
+
 		if len(msg) > 1 && msg[:len(msg)][0] != 35 {
 			log.WithFields(log.Fields{
 				"time": time.Now(),
 				"user": wt.auditUser,
-			}).Debug("ASCII返回:", msg)
-
-			output := strings.Replace(string(msg), "sh-4.3#", "", -1)
-			log.WithFields(log.Fields{
-				"time": time.Now(),
-				"user": wt.auditUser,
-			}).Info("msg=", output)
+			}).Debug("ASCII返回:", asciiToString(msg))
+			// output := strings.Replace(string(msg), "sh-4.3#", "", -1)
+			// log.WithFields(log.Fields{
+			// 	"time": time.Now(),
+			// 	"user": wt.auditUser,
+			// }).Info("msg=", output)
 		}
 	} else if action == "recive" {
 		if len(msg) > 0 {
-			log.Debug(time.Now(), wt.auditUser, "--- ASCII返回:", msg)
+			log.Debug(time.Now(), wt.auditUser, "--- ASCII返回:", asciiToString(msg))
 			for i, s := range msg {
+				if s == 9 {
+					// tab
+					wt.waitForAutocomplete = true
+					continue
+				}
 				if s == 8 {
 					wt.auditBuffer = wt.auditBuffer[:len(wt.auditBuffer)]
 					continue
@@ -276,7 +286,7 @@ func (wt *WebTTY) audit(action string, msg []byte) {
 					}
 
 				} else {
-					log.Debug("---- 单个ASCII返回: ", string(s))
+					log.Debug("---- 单个ASCII返回: ", s)
 					wt.auditBuffer = append(wt.auditBuffer, s)
 				}
 			}
@@ -291,21 +301,34 @@ type argResizeTerminal struct {
 
 func filterASCII(action string, msg []byte) bool {
 	if len(msg) > 1 && msg[0] == 13 && msg[1] == 10 && msg[len(msg)-1] == 32 && msg[len(msg)-2] == 35 {
-		log.Debug("---CR LF sh-4.3#---，不审计")
+		// log.Debug("---CR LF sh-4.3#---，不审计")
 		return false
 	}
 	if len(msg) > 1 && msg[0] == 115 && msg[1] == 104 && msg[len(msg)-1] == 32 && msg[len(msg)-2] == 35 {
-		log.Debug("---sh-4.3#---，不审计")
+		// log.Debug("---sh-4.3#---，不审计")
 		return false
 	}
 	if len(msg) == 2 && msg[0] == 13 && msg[1] == 10 {
-		log.Debug("---CR LF---，不审计")
+		// log.Debug("---CR LF---，不审计")
 		return false
 	}
 	if action == "send" && len(msg) == 1 && msg[0] == 13 {
-		log.Debug("---CR---，不审计")
+		// log.Debug("---CR---，不审计")
 		return false
 	}
 
 	return true
+}
+
+func asciiToString(msg []byte) string {
+	s := ""
+	for _, a := range msg {
+		as := asciiControlChars[int(a)]
+		if as != "" {
+			s += "*" + as + "*"
+		} else {
+			s += string(a)
+		}
+	}
+	return s
 }
